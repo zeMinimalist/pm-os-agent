@@ -31,3 +31,7 @@ Real screenshots of *your* Cortex running. These are the `00-build/CORTEX-ANATOM
 ## How to run it
 
 _Minimal steps for someone to reproduce the demo (env vars, and the command or the coding-agent prompt you used)._
+
+## Module 2 — Loop stop proof
+
+![Cortex safe human handoff after missing project data](m2-safe-handoff.png)
