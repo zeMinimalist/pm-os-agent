@@ -281,7 +281,10 @@ def run(which: str = "happy") -> None:
         print(json.dumps({k: v for k, v in verdict.items() if k != "_usage"}, indent=2))
 
         if verdict["verdict"] == "pass":
-            safe_handoff = proposed.lstrip().upper().startswith("ESCALATE:")
+            safe_handoff = bool(re.search(
+                r"(?im)^\s*(?:#{1,6}\s*)?(?:<b>|\*\*)?"
+                r"(?:escalate|escalation)\b",
+                proposed))
             checkpoint = ("SAFE HUMAN HANDOFF" if safe_handoff
                           else "HITL CHECKPOINT")
             banner(f"{checkpoint}, status update + any proposed stories queued for "
