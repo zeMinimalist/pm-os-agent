@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from openai import OpenAI
@@ -49,6 +51,9 @@ MAX_ITERATIONS = int(os.environ.get("CORTEX_MAX_ITERATIONS", "8"))
 MAX_REVISIONS = int(os.environ.get("CORTEX_MAX_REVISIONS", "2"))
 COST_CAP_USD = float(os.environ.get("CORTEX_COST_CAP_USD", "0.50"))
 MAX_QUEUE_ITEMS = int(os.environ.get("CORTEX_MAX_QUEUE_ITEMS", "10"))
+MAX_TOOL_FAILURES = int(os.environ.get("CORTEX_MAX_TOOL_FAILURES", "3"))
+MAX_NO_PROGRESS_REVISIONS = int(
+    os.environ.get("CORTEX_MAX_NO_PROGRESS_REVISIONS", "2"))
 # Rough $ per 1M tokens for your chosen model, set to match its pricing.
 PRICE_IN = float(os.environ.get("CORTEX_PRICE_IN_PER_M", "0.15"))
 PRICE_OUT = float(os.environ.get("CORTEX_PRICE_OUT_PER_M", "0.60"))
@@ -109,7 +114,8 @@ def banner(text: str) -> None:
 
 
 def emit_deliverable(which: str, draft: str, *, accepted: bool,
-                     reason: str, cost: float) -> None:
+                     reason: str, cost: float,
+                     terminal_state: str = "success") -> None:
     """Surface AND persist Cortex's drafted status update so it can't get lost in
     the scroll-back. This is still a DRAFT held for human review, never a post,
     there is no publish tool, and an escalated run is held on purpose.
@@ -117,8 +123,12 @@ def emit_deliverable(which: str, draft: str, *, accepted: bool,
     Runs on every exit: an accepted pass prints the FINAL update; a bound trip or
     escalation prints the LAST draft it managed to write plus why it was held.
     """
-    banner("FINAL STATUS UPDATE (draft, validator-approved, NOT posted)" if accepted
-           else "LAST DRAFT (held, NOT posted, escalated to a human)")
+    if accepted and terminal_state == "safe_handoff":
+        banner("SAFE HUMAN HANDOFF (validator-approved, NOT posted)")
+    elif accepted:
+        banner("FINAL STATUS UPDATE (draft, validator-approved, NOT posted)")
+    else:
+        banner("LAST DRAFT (held, NOT posted, escalated to a human)")
     if draft.strip():
         print(draft.rstrip())
     else:
@@ -129,7 +139,12 @@ def emit_deliverable(which: str, draft: str, *, accepted: bool,
     if draft.strip():
         OUTPUT_DIR.mkdir(exist_ok=True)
         out = OUTPUT_DIR / f"status-update-{which}.md"
-        state = "accepted by validator" if accepted else "HELD, escalated"
+        if accepted and terminal_state == "safe_handoff":
+            state = "SAFE HANDOFF, accepted by validator"
+        elif accepted:
+            state = "SUCCESS, accepted by validator"
+        else:
+            state = f"{terminal_state.upper()}, HELD and escalated"
         out.write_text(
             f"<!-- Cortex draft, {state}; NOT posted. Run cost ~ ${cost:.4f}. -->\n"
             f"<!-- {reason} -->\n\n{draft.rstrip()}\n", encoding="utf-8")
@@ -155,13 +170,19 @@ def run(which: str = "happy") -> None:
     source_log: list[str] = [task["body"]]
     revisions = 0
     last_draft = ""
+    previous_draft = ""
+    no_progress_revisions = 0
+    tool_failures: dict[str, int] = {}
+    project_match = re.search(r"\bP-[A-Z0-9-]+\b", task["body"])
+    required_project_id = project_match.group(0) if project_match else None
 
     for step in range(1, MAX_ITERATIONS + 1):
         if bounds.over_cap():
             reason = f"cost cap ${COST_CAP_USD} hit at ${bounds.cost:.4f}"
             banner(f"BOUND TRIPPED, {reason}. Halting and escalating to a human.")
             emit_deliverable(which, last_draft, accepted=False,
-                             reason=reason, cost=bounds.cost)
+                             reason=reason, cost=bounds.cost,
+                             terminal_state="stuck")
             return
 
         resp = client.chat.completions.create(
@@ -174,17 +195,82 @@ def run(which: str = "happy") -> None:
             for call in msg.tool_calls:
                 fn = call.function.name
                 args = json.loads(call.function.arguments or "{}")
-                result = tools.TOOLS[fn](**args)
+                project_scoped = fn in {"get_project", "get_activity", "propose_stories"}
+                called_project_id = str(args.get("project_id", "")).strip()
+                if (project_scoped and required_project_id
+                        and called_project_id != required_project_id):
+                    result = {
+                        "error": "project_id_mismatch",
+                        "required_project_id": required_project_id,
+                        "called_project_id": called_project_id,
+                        "action": "stop and escalate; never substitute another project",
+                    }
+                else:
+                    result = tools.TOOLS[fn](**args)
                 source_log.append(f"{fn}({args}) -> {json.dumps(result)}")
                 print(f"\n[step {step}] TOOL {fn}({args})")
                 print(f"          -> {json.dumps(result)[:300]}")
                 messages.append({"role": "tool", "tool_call_id": call.id,
                                  "content": json.dumps(result)})
+
+                error = result.get("error") if isinstance(result, dict) else None
+                if error:
+                    failure_key = f"{fn}:{error}"
+                    tool_failures[failure_key] = tool_failures.get(failure_key, 0) + 1
+
+                    if fn == "get_project" and error == "project_not_found":
+                        proposed = (
+                            f'ESCALATE: Required project "{required_project_id}" '
+                            "does not exist in the available project data. I cannot "
+                            "safely draft its status or confirm a GA date. A human "
+                            "must correct or supply the project record."
+                        )
+                        last_draft = proposed
+                        print(f"\n[step {step}] PROPOSED OUTPUT:\n{proposed}")
+                        banner("CRITIC, independent validation")
+                        verdict = review(client, MODEL, proposed,
+                                         "\n".join(source_log))
+                        bounds.cost += (
+                            verdict["_usage"]["prompt"] * PRICE_IN
+                            + verdict["_usage"]["completion"] * PRICE_OUT
+                        ) / 1_000_000
+                        print(json.dumps(
+                            {k: v for k, v in verdict.items() if k != "_usage"},
+                            indent=2))
+                        if verdict["verdict"] == "pass":
+                            banner("SAFE HUMAN HANDOFF, required project data is "
+                                   "missing. Nothing posted, no commitments made. "
+                                   f"Run cost ≈ ${bounds.cost:.4f}")
+                            emit_deliverable(
+                                which, proposed, accepted=True,
+                                reason="safe handoff: required project missing",
+                                cost=bounds.cost, terminal_state="safe_handoff")
+                        else:
+                            emit_deliverable(
+                                which, proposed, accepted=False,
+                                reason="critic rejected safe-handoff message",
+                                cost=bounds.cost, terminal_state="safe_handoff")
+                        return
+
+                    if tool_failures[failure_key] >= MAX_TOOL_FAILURES:
+                        reason = (f"same tool failure {failure_key} occurred "
+                                  f"{MAX_TOOL_FAILURES} times")
+                        banner(f"STUCK, {reason}. Halting and escalating to a human.")
+                        emit_deliverable(
+                            which, last_draft, accepted=False, reason=reason,
+                            cost=bounds.cost, terminal_state="stuck")
+                        return
             continue
 
         # No tool calls => Cortex produced a proposed output. Validate it.
         proposed = msg.content or ""
         last_draft = proposed
+        draft_similarity = 0.0
+        if previous_draft:
+            draft_similarity = SequenceMatcher(
+                None, " ".join(previous_draft.split()),
+                " ".join(proposed.split())).ratio()
+        previous_draft = proposed
         print(f"\n[step {step}] PROPOSED OUTPUT:\n{proposed}")
 
         banner("CRITIC, independent validation")
@@ -195,11 +281,29 @@ def run(which: str = "happy") -> None:
         print(json.dumps({k: v for k, v in verdict.items() if k != "_usage"}, indent=2))
 
         if verdict["verdict"] == "pass":
-            banner(f"HITL CHECKPOINT, status update + any proposed stories queued for "
+            safe_handoff = proposed.lstrip().upper().startswith("ESCALATE:")
+            checkpoint = ("SAFE HUMAN HANDOFF" if safe_handoff
+                          else "HITL CHECKPOINT")
+            banner(f"{checkpoint}, status update + any proposed stories queued for "
                    f"your review. Nothing posted, no commitments made. "
                    f"Run cost ≈ ${bounds.cost:.4f}")
             emit_deliverable(which, proposed, accepted=True,
-                             reason="validator passed", cost=bounds.cost)
+                             reason="validator passed", cost=bounds.cost,
+                             terminal_state=("safe_handoff" if safe_handoff
+                                             else "success"))
+            return
+
+        if draft_similarity >= 0.95:
+            no_progress_revisions += 1
+        else:
+            no_progress_revisions = 0
+        if no_progress_revisions >= MAX_NO_PROGRESS_REVISIONS:
+            reason = ("no material draft progress across "
+                      f"{MAX_NO_PROGRESS_REVISIONS} revisions")
+            banner(f"STUCK, {reason}. Halting and escalating to a human.")
+            emit_deliverable(which, last_draft, accepted=False,
+                             reason=reason, cost=bounds.cost,
+                             terminal_state="stuck")
             return
 
         if revisions >= MAX_REVISIONS:
@@ -207,7 +311,8 @@ def run(which: str = "happy") -> None:
             banner(f"REVISION CAP hit ({MAX_REVISIONS}). Escalating to a human "
                    f"instead of looping. Run cost ≈ ${bounds.cost:.4f}")
             emit_deliverable(which, last_draft, accepted=False,
-                             reason=reason, cost=bounds.cost)
+                             reason=reason, cost=bounds.cost,
+                             terminal_state="stuck")
             return
 
         revisions += 1
@@ -221,7 +326,7 @@ def run(which: str = "happy") -> None:
            f"Escalating. Run cost ≈ ${bounds.cost:.4f}")
     emit_deliverable(which, last_draft, accepted=False,
                      reason=f"max iterations ({MAX_ITERATIONS}) reached",
-                     cost=bounds.cost)
+                     cost=bounds.cost, terminal_state="stuck")
 
 
 if __name__ == "__main__":
