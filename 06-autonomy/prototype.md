@@ -35,3 +35,31 @@ _Minimal steps for someone to reproduce the demo (env vars, and the command or t
 ## Module 2 — Loop stop proof
 
 ![Cortex safe human handoff after missing project data](m2-safe-handoff.png)
+
+## Module 3 — Independent critic rejection
+
+> Cortex’s independent validator rejected an unsupported claim, blocked the draft before the HITL Stop, allowed two revisions, and escalated after the revision cap.
+
+```text
+CORTEX DRAFT:
+“The open issue regarding empty-state copy is under review but does not
+impact the overall project health or prevent progress.”
+
+CRITIC:
+{
+  "verdict": "fail",
+  "reasons": [
+    "The output mentions that the open issue does not impact the overall
+    project health and does not prevent progress, which is not justified
+    by the pulled data."
+  ]
+}
+
+-> critic rejected; revision 1/2
+-> critic rejected; revision 2/2
+
+REVISION CAP hit (2). Escalating to a human instead of looping.
+
+LAST DRAFT:
+Held, NOT posted, escalated to a human.
+```
