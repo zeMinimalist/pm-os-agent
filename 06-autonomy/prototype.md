@@ -63,3 +63,13 @@ REVISION CAP hit (2). Escalating to a human instead of looping.
 LAST DRAFT:
 Held, NOT posted, escalated to a human.
 ```
+
+## Module 4 — Grounding and withheld-source probe
+
+![Grounded Cortex run](m4-grounded.png)
+
+> **Grounded state:** With current activity available, Cortex cited PRs #820/#823 and activation moving from 41% to 43%. The critic passed the draft, which advanced only to the HITL Stop and was not posted.
+
+![Withheld-source Cortex run](m4-withheld-source.png)
+
+> **Withheld-source state:** With `get_activity` unavailable, Cortex reused stale 39% to 41% evidence. The critic failed the draft, the revision cap fired, and the draft was held and escalated rather than posted.
