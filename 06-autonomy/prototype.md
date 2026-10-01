@@ -1,3 +1,7 @@
+# Cortex Prototype
+
+Cortex is an assisted, bounded PM chief-of-staff prototype that turns a project-scoped request into a grounded leadership update and a review-only set of next-sprint stories. It retrieves current project state, engineering activity, roadmap context, past updates, and team norms; drafts the work; routes it through an independent critic; and sends either the validated artifact or a held failure package to a normal or exception-path **HITL Stop**. Nothing publishes automatically. I built Cortex iteratively in GitHub Codespaces using Python, `gpt-4o-mini`, fixture-backed tools, a bounded goal loop, an independent validator, retrieval and memory controls, hard cost and iteration caps, and trajectory evals. Repository: [pm-os-agent](https://github.com/zeMinimalist/pm-os-agent).
+
 # Prototype: Cortex PM Chief-of-Staff Agent
 
 > Module 6 · ★ Deliverable 1, the working agent demo
@@ -87,3 +91,13 @@ Held, NOT posted, escalated to a human.
 ### Reflection
 
 At the **HITL Stop**, the human sees the terminal reason, validator result, held output, and partial actions taken before the stop. The jailbreak did not leak confidential data, post an update, close a ticket, change a launch gate, or commit a date; the capped run did not continue spending or convert queued proposals into real backlog items. The next control I would tune is the exception-path HITL Stop: it should explicitly enumerate every partial side effect and its idempotency or rollback status. I would also keep the jailbreak run as a failing replay until Cortex identifies and refuses the injection on its first response.
+
+## Module 6 — End-to-end autonomy evidence
+
+![M6 end-to-end run](m6-end-to-end.png)
+
+> **End-to-end run:** Cortex retrieved the grounded `on_track` Northstar state and produced a reviewable draft, but the critic oscillated over whether normal-severity issue #825 required Green or Yellow. The two-revision cap stopped the loop, preserved the last draft, bounded cost at approximately $0.0049, and routed the run to the exception-path **HITL Stop** without posting.
+
+### Capstone takeaway
+
+The final run demonstrates why Cortex remains **Assisted / Rung 2**. Its retrieval and containment controls worked, but EV-6 failed because the critic contradicted the shared status policy. This failure is retained as regression evidence rather than hidden through repeated runs. Cortex can support a controlled pilot, but it must clear EV-1, EV-2, and EV-6 before receiving supervised write authority.
